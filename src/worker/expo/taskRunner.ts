@@ -5,7 +5,12 @@ import type { IndexerProvider } from "../../providers/indexer";
 import type { ArkProvider } from "../../providers/ark";
 import type { ExtendedVirtualCoin, VirtualCoin } from "../../wallet";
 import type { Contract } from "../../contracts/types";
-import { getRandomId } from "../../wallet/utils";
+import type { ReadonlyWallet } from "../../wallet/wallet";
+import {
+    getRandomId,
+    extendVirtualCoin,
+    extendVtxoFromContract,
+} from "../../wallet/utils";
 
 /**
  * Shared dependencies injected into every processor at runtime.
@@ -22,9 +27,9 @@ export interface TaskDependencies {
  * A stateless unit that handles one type of task item.
  *
  * Processors must not keep in-memory state across invocations —
- * all coordination lives in the {@link TaskQueue} and repositories.
+ * all coordination lives in the @see TaskQueue and repositories.
  *
- * The `TDeps` parameter defaults to {@link TaskDependencies} but
+ * The `TDeps` parameter defaults to @see TaskDependencies but
  * can be overridden for domain-specific processors (e.g. swap processing).
  */
 export interface TaskProcessor<TDeps = TaskDependencies> {
@@ -40,7 +45,7 @@ export interface TaskProcessor<TDeps = TaskDependencies> {
  *
  * For each task in the inbox:
  * 1. Find the processor whose `taskType` matches `task.type`.
- * 2. Execute it, producing a {@link TaskResult}.
+ * 2. Execute it, producing a @see TaskResult.
  * 3. Push the result to the outbox and remove the task from the inbox.
  *
  * Tasks with no matching processor produce a `"noop"` result.
@@ -96,4 +101,49 @@ export async function runTasks<TDeps = TaskDependencies>(
     }
 
     return results;
+}
+
+/**
+ * Options for @see createTaskDependencies.
+ */
+export interface CreateTaskDependenciesOptions {
+    walletRepository: WalletRepository;
+    contractRepository: ContractRepository;
+    indexerProvider: IndexerProvider;
+    arkProvider: ArkProvider;
+    offchainTapscript: ReadonlyWallet["offchainTapscript"];
+}
+
+/**
+ * Build the @see TaskDependencies needed by task processors
+ * (e.g. `src/worker/expo/processors/contractPollProcessor.ts`)
+ *
+ * This is the same construction that `defineExpoBackgroundTask` does
+ * internally, extracted so that consumers with custom schedulers
+ * (e.g. bare React Native with `react-native-background-fetch`)
+ * can build deps without depending on Expo.
+ */
+export function createTaskDependencies(
+    options: CreateTaskDependenciesOptions
+): TaskDependencies {
+    const {
+        walletRepository,
+        contractRepository,
+        indexerProvider,
+        arkProvider,
+        offchainTapscript,
+    } = options;
+
+    return {
+        walletRepository,
+        contractRepository,
+        indexerProvider,
+        arkProvider,
+        extendVtxo: (vtxo: VirtualCoin, contract?: Contract) => {
+            if (contract) {
+                return extendVtxoFromContract(vtxo, contract);
+            }
+            return extendVirtualCoin({ offchainTapscript }, vtxo);
+        },
+    };
 }

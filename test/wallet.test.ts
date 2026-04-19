@@ -6,9 +6,18 @@ import {
     OnchainWallet,
     RestArkProvider,
     ReadonlyWallet,
+    InMemoryWalletRepository,
+    InMemoryContractRepository,
+    type IndexerProvider,
+    type ArkProvider,
+    type OnchainProvider,
 } from "../src";
 import { ReadonlySingleKey } from "../src/identity/singleKey";
-import type { Coin } from "../src/wallet";
+import {
+    IndexedDBWalletRepository,
+    IndexedDBContractRepository,
+} from "../src/repositories";
+import type { Coin, VirtualCoin } from "../src/wallet";
 
 // Mock fetch
 const mockFetch = vi.fn();
@@ -23,6 +32,11 @@ const MockEventSource = vi.fn().mockImplementation((url: string) => ({
 }));
 vi.stubGlobal("EventSource", MockEventSource);
 
+// Shared IndexedDB repos — cleared between tests so cached VTXOs,
+// sync cursors, and contracts from one test don't leak into the next.
+const sharedRepo = new IndexedDBWalletRepository();
+const sharedContractRepo = new IndexedDBContractRepository();
+
 describe("Wallet", () => {
     // Test vector from BIP340
     const mockPrivKeyHex =
@@ -32,8 +46,10 @@ describe("Wallet", () => {
         "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     const mockIdentity = SingleKey.fromHex(mockPrivKeyHex);
 
-    beforeEach(() => {
+    beforeEach(async () => {
         mockFetch.mockReset();
+        await sharedRepo.clear();
+        await sharedContractRepo.clear();
     });
 
     describe("getBalance", () => {
@@ -94,8 +110,7 @@ describe("Wallet", () => {
             // Setup mocks in the correct order based on actual call sequence:
             // 1. getInfo() call during wallet creation
             // 2. getBoardingUtxos() -> getCoins() call
-            // 3. getVtxos() -> first vtxos call (spendable)
-            // 4. getVtxos() -> second vtxos call (recoverable)
+            // 3. getVtxos() -> batched vtxos call
 
             mockFetch
                 .mockResolvedValueOnce({
@@ -118,13 +133,16 @@ describe("Wallet", () => {
                     ok: true,
                     json: () => Promise.resolve(mockUTXOs),
                 })
-                .mockResolvedValueOnce({
-                    ok: true,
-                    json: () => Promise.resolve(mockServerResponse),
-                })
-                .mockResolvedValueOnce({
-                    ok: true,
-                    json: () => Promise.resolve({ vtxos: [] }),
+                .mockImplementationOnce((url: string) => {
+                    // Extract the script from the request URL so the
+                    // mock response matches the wallet's actual script.
+                    const params = new URLSearchParams(url.split("?")[1]);
+                    const script = params.getAll("scripts")[0];
+                    mockServerResponse.vtxos[0].script = script;
+                    return Promise.resolve({
+                        ok: true,
+                        json: () => Promise.resolve(mockServerResponse),
+                    });
                 });
 
             const wallet = await Wallet.create({
@@ -553,10 +571,15 @@ describe("Wallet", () => {
         });
 
         it("should convert Wallet to ReadonlyWallet", async () => {
-            mockFetch.mockResolvedValueOnce({
-                ok: true,
-                json: () => Promise.resolve(mockArkInfo),
-            });
+            mockFetch
+                .mockResolvedValueOnce({
+                    ok: true,
+                    json: () => Promise.resolve(mockArkInfo),
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    json: () => Promise.resolve({ vtxos: [] }),
+                });
 
             const wallet = await Wallet.create({
                 identity: mockIdentity,
@@ -577,13 +600,20 @@ describe("Wallet", () => {
             const readonlyBoardingAddress =
                 await readonlyWallet.getBoardingAddress();
             expect(boardingAddress).toBe(readonlyBoardingAddress);
+
+            await wallet.dispose();
         });
 
         it("should not have sendBitcoin method on ReadonlyWallet type", async () => {
-            mockFetch.mockResolvedValueOnce({
-                ok: true,
-                json: () => Promise.resolve(mockArkInfo),
-            });
+            mockFetch
+                .mockResolvedValueOnce({
+                    ok: true,
+                    json: () => Promise.resolve(mockArkInfo),
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    json: () => Promise.resolve({ vtxos: [] }),
+                });
 
             const wallet = await Wallet.create({
                 identity: mockIdentity,
@@ -595,6 +625,8 @@ describe("Wallet", () => {
             // ReadonlyWallet should not have sendBitcoin in its type
             expect((readonlyWallet as any).sendBitcoin).toBeUndefined();
             expect((readonlyWallet as any).settle).toBeUndefined();
+
+            await wallet.dispose();
         });
 
         it("should allow querying balance on ReadonlyWallet", async () => {
@@ -617,10 +649,10 @@ describe("Wallet", () => {
                     ok: true,
                     json: () => Promise.resolve(mockArkInfo),
                 })
-                .mockResolvedValueOnce({
-                    ok: true,
-                    json: () => Promise.resolve(mockUTXOs),
-                })
+                // VtxoManager background init fetches VTXOs for the
+                // default contract via createContract; provide a mock
+                // so dispose() (which awaits that init) doesn't shift
+                // the queue.
                 .mockResolvedValueOnce({
                     ok: true,
                     json: () => Promise.resolve({ vtxos: [] }),
@@ -633,11 +665,22 @@ describe("Wallet", () => {
 
             const readonlyWallet = await wallet.toReadonly();
 
+            // Dispose the full wallet to stop its background VtxoManager/
+            // ContractManager operations that would consume fetch mocks.
+            await wallet.dispose();
+
             // Should be able to get balance
+            // getBalance calls getBoardingUtxos (1 mock) then getVtxos →
+            // syncVtxos which, with a cursor present, does a delta fetch
+            // (1 mock) plus a pendingOnly reconciliation (1 mock).
             mockFetch
                 .mockResolvedValueOnce({
                     ok: true,
                     json: () => Promise.resolve(mockUTXOs),
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    json: () => Promise.resolve({ vtxos: [] }),
                 })
                 .mockResolvedValueOnce({
                     ok: true,
@@ -648,9 +691,246 @@ describe("Wallet", () => {
             expect(balance.boarding.total).toBe(100000);
         });
     });
+
+    describe("delta-sync reconciliation", () => {
+        const mockArkInfo = {
+            signerPubkey: mockServerKeyHex,
+            forfeitPubkey: mockServerKeyHex,
+            batchExpiry: BigInt(144),
+            unilateralExitDelay: BigInt(144),
+            boardingExitDelay: BigInt(144),
+            roundInterval: BigInt(144),
+            network: "mutinynet",
+            dust: BigInt(1000),
+            forfeitAddress: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+            checkpointTapscript:
+                "5ab27520e35799157be4b37565bb5afe4d04e6a0fa0a4b6a4f4e48b0d904685d253cdbdbac",
+        };
+        const mockBatchExpiry = 1767225600000;
+
+        async function createReadonlyTestWallet(
+            getVtxos: IndexerProvider["getVtxos"]
+        ) {
+            const compressedPubKey = await mockIdentity.compressedPublicKey();
+            const readonlyIdentity =
+                ReadonlySingleKey.fromPublicKey(compressedPubKey);
+            const walletRepository = new InMemoryWalletRepository();
+            const contractRepository = new InMemoryContractRepository();
+
+            const wallet = await ReadonlyWallet.create({
+                identity: readonlyIdentity,
+                arkServerUrl: "http://localhost:7070",
+                arkProvider: {
+                    getInfo: vi.fn().mockResolvedValue(mockArkInfo),
+                } as Partial<ArkProvider> as ArkProvider,
+                indexerProvider: {
+                    getVtxos,
+                } as Partial<IndexerProvider> as IndexerProvider,
+                onchainProvider: {} as OnchainProvider,
+                storage: {
+                    walletRepository,
+                    contractRepository,
+                },
+            });
+
+            return { wallet, walletRepository };
+        }
+
+        function createMockVtxo(
+            script: string,
+            state: "preconfirmed" | "settled" = "preconfirmed"
+        ): VirtualCoin {
+            return {
+                txid: "11".repeat(32),
+                vout: 0,
+                value: 50_000,
+                status: {
+                    confirmed: state !== "preconfirmed",
+                    isLeaf: state !== "preconfirmed",
+                },
+                virtualStatus: {
+                    state,
+                    commitmentTxIds: ["22".repeat(32)],
+                    batchExpiry: mockBatchExpiry,
+                },
+                spentBy: "",
+                settledBy: state === "settled" ? "33".repeat(32) : undefined,
+                arkTxId: "",
+                createdAt: new Date("2026-01-01T00:00:00.000Z"),
+                isUnrolled: false,
+                isSpent: false,
+                script,
+            };
+        }
+
+        it("should keep a preconfirmed VTXO when the full re-fetch still returns it", async () => {
+            let walletScript = "";
+            const getVtxos = vi
+                .fn<IndexerProvider["getVtxos"]>()
+                .mockImplementationOnce(async (opts) => {
+                    walletScript = opts?.scripts?.[0] ?? "";
+                    return { vtxos: [createMockVtxo(walletScript)] };
+                })
+                .mockResolvedValueOnce({ vtxos: [] })
+                .mockImplementationOnce(async () => ({
+                    vtxos: [createMockVtxo(walletScript)],
+                }));
+
+            const { wallet } = await createReadonlyTestWallet(getVtxos);
+
+            expect(await wallet.getVtxos()).toHaveLength(1);
+            expect(await wallet.getVtxos()).toHaveLength(1);
+            expect(getVtxos).toHaveBeenCalledTimes(3);
+        });
+
+        it("should update VTXO state when the full re-fetch shows it settled", async () => {
+            let walletScript = "";
+            const getVtxos = vi
+                .fn<IndexerProvider["getVtxos"]>()
+                .mockImplementationOnce(async (opts) => {
+                    walletScript = opts?.scripts?.[0] ?? "";
+                    return { vtxos: [createMockVtxo(walletScript)] };
+                })
+                .mockResolvedValueOnce({ vtxos: [] })
+                .mockImplementationOnce(async () => ({
+                    vtxos: [createMockVtxo(walletScript, "settled")],
+                }));
+
+            const { wallet, walletRepository } =
+                await createReadonlyTestWallet(getVtxos);
+
+            expect((await wallet.getVtxos())[0].virtualStatus.state).toBe(
+                "preconfirmed"
+            );
+
+            const vtxos = await wallet.getVtxos();
+            expect(vtxos).toHaveLength(1);
+            expect(vtxos[0].virtualStatus.state).toBe("settled");
+            expect(vtxos[0].isSpent).toBe(false);
+
+            const cached = await walletRepository.getVtxos(
+                await wallet.getAddress()
+            );
+            expect(cached).toHaveLength(1);
+            expect(cached[0].virtualStatus.state).toBe("settled");
+        });
+
+        it("should mark a cached preconfirmed VTXO as spent when the full re-fetch no longer returns it", async () => {
+            let walletScript = "";
+            const getVtxos = vi
+                .fn<IndexerProvider["getVtxos"]>()
+                .mockImplementationOnce(async (opts) => {
+                    walletScript = opts?.scripts?.[0] ?? "";
+                    return { vtxos: [createMockVtxo(walletScript)] };
+                })
+                .mockResolvedValueOnce({ vtxos: [] })
+                .mockResolvedValueOnce({ vtxos: [] });
+
+            const { wallet, walletRepository } =
+                await createReadonlyTestWallet(getVtxos);
+
+            expect(await wallet.getVtxos()).toHaveLength(1);
+            expect(await wallet.getVtxos()).toEqual([]);
+
+            const cached = await walletRepository.getVtxos(
+                await wallet.getAddress()
+            );
+            expect(cached).toHaveLength(1);
+            expect(cached[0].isSpent).toBe(true);
+        });
+
+        it("should mark a cached settled VTXO as spent when the full re-fetch no longer returns it", async () => {
+            let walletScript = "";
+            const getVtxos = vi
+                .fn<IndexerProvider["getVtxos"]>()
+                .mockImplementationOnce(async (opts) => {
+                    walletScript = opts?.scripts?.[0] ?? "";
+                    return {
+                        vtxos: [createMockVtxo(walletScript, "settled")],
+                    };
+                })
+                .mockResolvedValueOnce({ vtxos: [] })
+                .mockResolvedValueOnce({ vtxos: [] });
+
+            const { wallet, walletRepository } =
+                await createReadonlyTestWallet(getVtxos);
+
+            const vtxos = await wallet.getVtxos();
+            expect(vtxos).toHaveLength(1);
+            expect(vtxos[0].virtualStatus.state).toBe("settled");
+
+            expect(await wallet.getVtxos()).toEqual([]);
+
+            const cached = await walletRepository.getVtxos(
+                await wallet.getAddress()
+            );
+            expect(cached).toHaveLength(1);
+            expect(cached[0].isSpent).toBe(true);
+        });
+    });
+
+    describe("mainnet unilateral exit delay pinning", () => {
+        // If this constant changes in the SDK, update both sides intentionally —
+        // changing the pinned value alters derived addresses for every mainnet
+        // wallet.
+        const MAINNET_PINNED_DELAY = 605184n;
+
+        const mockMainnetInfo = (unilateralExitDelay: bigint) => ({
+            signerPubkey: mockServerKeyHex,
+            forfeitPubkey: mockServerKeyHex,
+            batchExpiry: BigInt(144),
+            unilateralExitDelay,
+            roundInterval: BigInt(144),
+            network: "bitcoin",
+            forfeitAddress: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            checkpointTapscript:
+                "5ab27520e35799157be4b37565bb5afe4d04e6a0fa0a4b6a4f4e48b0d904685d253cdbdbac",
+        });
+
+        it("pins the exit timelock to 605184s on mainnet even when the server advertises a shorter delay", async () => {
+            mockFetch.mockResolvedValueOnce({
+                ok: true,
+                json: () => Promise.resolve(mockMainnetInfo(86528n)),
+            });
+
+            const wallet = await Wallet.create({
+                identity: mockIdentity,
+                arkServerUrl: "http://localhost:7070",
+            });
+
+            expect(wallet.offchainTapscript.options.csvTimelock).toEqual({
+                value: MAINNET_PINNED_DELAY,
+                type: "seconds",
+            });
+        });
+
+        it("lets an explicit config.exitTimelock override the mainnet pin", async () => {
+            mockFetch.mockResolvedValueOnce({
+                ok: true,
+                json: () => Promise.resolve(mockMainnetInfo(86528n)),
+            });
+
+            // bip68 seconds must be multiples of 512.
+            const override = { value: 1024n, type: "seconds" as const };
+            const wallet = await Wallet.create({
+                identity: mockIdentity,
+                arkServerUrl: "http://localhost:7070",
+                exitTimelock: override,
+            });
+
+            expect(wallet.offchainTapscript.options.csvTimelock).toEqual(
+                override
+            );
+        });
+    });
 });
 
 describe("ReadonlyWallet", () => {
+    beforeEach(async () => {
+        mockFetch.mockReset();
+        await sharedRepo.clear();
+    });
+
     const mockServerKeyHex =
         "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 

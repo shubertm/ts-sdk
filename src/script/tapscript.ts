@@ -38,9 +38,9 @@ export interface ArkTapscript<T extends TapscriptType, Params> {
 }
 
 /**
- * decodeTapscript is a function that decodes an ark tapsript from a raw script.
+ * decodeTapscript is a function that decodes an Arkade tapscript from a raw script.
  *
- * @throws {Error} if the script is not a valid ark tapscript
+ * @throws {Error} if the script is not a valid Arkade tapscript
  * @example
  * ```typescript
  * const arkTapscript = decodeTapscript(new Uint8Array(32));
@@ -94,6 +94,7 @@ export namespace MultisigTapscript {
         type?: MultisigType;
     };
 
+    /** Encode a plain multisig tapscript. */
     export function encode(params: Params): Type {
         if (params.pubkeys.length === 0) {
             throw new Error("At least 1 pubkey is required");
@@ -138,6 +139,7 @@ export namespace MultisigTapscript {
         };
     }
 
+    /** Decode a plain multisig tapscript from raw script bytes. */
     export function decode(script: Uint8Array): Type {
         if (script.length === 0) {
             throw new Error("Failed to decode: script is empty");
@@ -284,6 +286,7 @@ export namespace MultisigTapscript {
         };
     }
 
+    /** Return true when the tapscript is a plain multisig tapscript. */
     export function is(tapscript: ArkTapscript<any, any>): tapscript is Type {
         return tapscript.type === TapscriptType.Multisig;
     }
@@ -309,6 +312,7 @@ export namespace CSVMultisigTapscript {
         timelock: RelativeTimelock;
     } & MultisigTapscript.Params;
 
+    /** Encode a CSV multisig tapscript. */
     export function encode(params: Params): Type {
         for (const pubkey of params.pubkeys) {
             if (pubkey.length !== 32) {
@@ -346,6 +350,7 @@ export namespace CSVMultisigTapscript {
         };
     }
 
+    /** Decode a CSV multisig tapscript from raw script bytes. */
     export function decode(script: Uint8Array): Type {
         if (script.length === 0) {
             throw new Error("Failed to decode: script is empty");
@@ -406,6 +411,7 @@ export namespace CSVMultisigTapscript {
         };
     }
 
+    /** Return true when the tapscript is a CSV multisig tapscript. */
     export function is(tapscript: ArkTapscript<any, any>): tapscript is Type {
         return tapscript.type === TapscriptType.CSVMultisig;
     }
@@ -451,6 +457,7 @@ export namespace ConditionCSVMultisigTapscript {
         conditionScript: Bytes;
     } & CSVMultisigTapscript.Params;
 
+    /** Encode a condition + CSV multisig tapscript. */
     export function encode(params: Params): Type {
         const script = new Uint8Array([
             ...params.conditionScript,
@@ -465,6 +472,7 @@ export namespace ConditionCSVMultisigTapscript {
         };
     }
 
+    /** Decode a condition + CSV multisig tapscript from raw script bytes. */
     export function decode(script: Uint8Array): Type {
         if (script.length === 0) {
             throw new Error("Failed to decode: script is empty");
@@ -520,6 +528,7 @@ export namespace ConditionCSVMultisigTapscript {
         };
     }
 
+    /** Return true when the tapscript is a condition + CSV multisig tapscript. */
     export function is(tapscript: ArkTapscript<any, any>): tapscript is Type {
         return tapscript.type === TapscriptType.ConditionCSVMultisig;
     }
@@ -571,6 +580,7 @@ export namespace ConditionMultisigTapscript {
         conditionScript: Bytes;
     } & MultisigTapscript.Params;
 
+    /** Encode a condition + multisig tapscript. */
     export function encode(params: Params): Type {
         const script = new Uint8Array([
             ...params.conditionScript,
@@ -585,6 +595,7 @@ export namespace ConditionMultisigTapscript {
         };
     }
 
+    /** Decode a condition + multisig tapscript from raw script bytes. */
     export function decode(script: Uint8Array): Type {
         if (script.length === 0) {
             throw new Error("Failed to decode: script is empty");
@@ -640,6 +651,7 @@ export namespace ConditionMultisigTapscript {
         };
     }
 
+    /** Return true when the tapscript is a condition + multisig tapscript. */
     export function is(tapscript: ArkTapscript<any, any>): tapscript is Type {
         return tapscript.type === TapscriptType.ConditionMultisig;
     }
@@ -691,6 +703,7 @@ export namespace CLTVMultisigTapscript {
         absoluteTimelock: bigint;
     } & MultisigTapscript.Params;
 
+    /** Encode a CLTV multisig tapscript. */
     export function encode(params: Params): Type {
         const locktime = MinimalScriptNum.encode(params.absoluteTimelock);
         const asm: ScriptType = [
@@ -712,6 +725,7 @@ export namespace CLTVMultisigTapscript {
         };
     }
 
+    /** Decode a CLTV multisig tapscript from raw script bytes. */
     export function decode(script: Uint8Array): Type {
         if (script.length === 0) {
             throw new Error("Failed to decode: script is empty");
@@ -725,6 +739,15 @@ export namespace CLTVMultisigTapscript {
         const asm = Script.decode(script);
 
         const locktime = asm[0];
+        if (typeof locktime === "string") {
+            throw new Error("Invalid script: expected locktime number");
+        }
+
+        if (asm[1] !== "CHECKLOCKTIMEVERIFY" || asm[2] !== "DROP") {
+            throw new Error(
+                "Invalid script: expected CHECKLOCKTIMEVERIFY DROP"
+            );
+        }
 
         const multisigScript = new Uint8Array(Script.encode(asm.slice(3)));
         let multisig: MultisigTapscript.Type;
@@ -765,6 +788,7 @@ export namespace CLTVMultisigTapscript {
         };
     }
 
+    /** Return true when the tapscript is a CLTV multisig tapscript. */
     export function is(tapscript: ArkTapscript<any, any>): tapscript is Type {
         return tapscript.type === TapscriptType.CLTVMultisig;
     }

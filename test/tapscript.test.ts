@@ -140,9 +140,9 @@ describe("CLTVMultisigTapscript", () => {
         );
     });
 
-    it("should encode and decode with small absolute timelock", () => {
+    it("should encode and decode with number absolute timelock", () => {
         const params = {
-            absoluteTimelock: BigInt(16), // Some timestamp
+            absoluteTimelock: BigInt(10), // Some block height between 0 and 16
             pubkeys: [exPubKey1],
             type: MultisigTapscript.MultisigType.CHECKSIG,
         };

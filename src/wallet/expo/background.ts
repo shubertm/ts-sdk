@@ -4,7 +4,7 @@ import type { ContractRepository } from "../../repositories/contractRepository";
 import type { AsyncStorageTaskQueue } from "../../worker/expo/asyncStorageTaskQueue";
 import type { TaskProcessor } from "../../worker/expo/taskRunner";
 import type { TaskItem } from "../../worker/expo/taskQueue";
-import { runTasks } from "../../worker/expo/taskRunner";
+import { runTasks, createTaskDependencies } from "../../worker/expo/taskRunner";
 import {
     contractPollProcessor,
     CONTRACT_POLL_TASK_TYPE,
@@ -12,11 +12,7 @@ import {
 import { DefaultVtxo } from "../../script/default";
 import { ExpoArkProvider } from "../../providers/expoArk";
 import { ExpoIndexerProvider } from "../../providers/expoIndexer";
-import {
-    extendVirtualCoin,
-    extendVtxoFromContract,
-    getRandomId,
-} from "../utils";
+import { getRandomId } from "../utils";
 
 // ── Inline type declarations for optional Expo packages ──────────
 // These avoid a hard build-time dependency on expo-background-task
@@ -67,7 +63,7 @@ function requireBackgroundTask(): BackgroundTaskModule {
 // ── Persisted config ─────────────────────────────────────────────
 
 /**
- * Wallet parameters persisted by {@link ExpoWallet.setup} and read
+ * Wallet parameters persisted by @see ExpoWallet.setup and read
  * by the background handler to reconstruct providers and `extendVtxo`
  * without a network call.
  */
@@ -82,7 +78,7 @@ export interface PersistedBackgroundConfig {
 // ── Public API ───────────────────────────────────────────────────
 
 /**
- * Options for {@link defineExpoBackgroundTask}.
+ * Options for @see defineExpoBackgroundTask.
  */
 export interface DefineBackgroundTaskOptions {
     /** AsyncStorage-backed queue (must match the one passed to ExpoWallet.setup). */
@@ -147,8 +143,8 @@ export function defineExpoBackgroundTask(
             const arkProvider = new ExpoArkProvider(config.arkServerUrl);
 
             // Reconstruct default offchainTapscript as fallback
-            // for VTXOs not associated with a contract.
-            const defaultTapscript = new DefaultVtxo.Script({
+            // for virtual outputs not associated with a contract.
+            const offchainTapscript = new DefaultVtxo.Script({
                 pubKey: hex.decode(config.pubkeyHex),
                 serverPubKey: hex.decode(config.serverPubKeyHex),
                 csvTimelock: {
@@ -157,21 +153,15 @@ export function defineExpoBackgroundTask(
                 },
             });
 
-            await runTasks(taskQueue, processors, {
+            const deps = createTaskDependencies({
                 walletRepository,
                 contractRepository,
                 indexerProvider,
                 arkProvider,
-                extendVtxo: (vtxo, contract) => {
-                    if (contract) {
-                        return extendVtxoFromContract(vtxo, contract);
-                    }
-                    return extendVirtualCoin(
-                        { offchainTapscript: defaultTapscript },
-                        vtxo
-                    );
-                },
+                offchainTapscript,
             });
+
+            await runTasks(taskQueue, processors, deps);
 
             // Acknowledge outbox results (no foreground to consume them)
             const results = await taskQueue.getResults();
@@ -205,8 +195,8 @@ export function defineExpoBackgroundTask(
 /**
  * Activate the OS-level background task scheduler.
  *
- * Call this after {@link defineExpoBackgroundTask} (typically inside
- * {@link ExpoWallet.setup} or in a React component after wallet init).
+ * Call this after @see defineExpoBackgroundTask (typically inside
+ * @see ExpoWallet.setup or in a React component after wallet init).
  *
  * @param minimumInterval - Minimum interval in minutes (default 15).
  */

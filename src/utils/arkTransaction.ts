@@ -20,9 +20,10 @@ import { CSVMultisigTapscript } from "../script/tapscript";
 import { setArkPsbtField, VtxoTaprootTree } from "./unknownFields";
 import { Transaction } from "./transaction";
 import { ArkAddress } from "../script/address";
+import { Extension } from "../extension";
 
 export type ArkTxInput = {
-    // the script used to spend the vtxo
+    // the script used to spend the virtual output
     tapLeafScript: TapLeafScript;
 } & EncodedVtxoScript &
     Pick<VirtualCoin, "txid" | "vout" | "value">;
@@ -37,7 +38,7 @@ export type OffchainTx = {
  *
  * Creates one checkpoint transaction per input and a virtual transaction that
  * combines all the checkpoints, sending to the specified outputs. This is the
- * core function for creating Ark transactions.
+ * core function for creating Arkade transactions.
  *
  * @param inputs - Array of virtual transaction inputs
  * @param outputs - Array of transaction outputs
@@ -49,13 +50,28 @@ export function buildOffchainTx(
     outputs: TransactionOutput[],
     serverUnrollScript: CSVMultisigTapscript.Type
 ): OffchainTx {
-    let hasOpReturn = false;
+    // TODO: use arkd /info
+    const MAX_OP_RETURN = 2;
+
+    let countOpReturn = 0;
+    let hasExtensionOutput = false;
     for (const [index, output] of outputs.entries()) {
         if (!output.script) throw new Error(`missing output script ${index}`);
-        const isOpReturn = Script.decode(output.script)[0] === "RETURN";
-        if (!isOpReturn) continue;
-        if (hasOpReturn) throw new Error("multiple OP_RETURN outputs");
-        hasOpReturn = true;
+        const isExtension = Extension.isExtension(output.script);
+        const isOpReturn =
+            isExtension || Script.decode(output.script)[0] === "RETURN";
+        if (isOpReturn) {
+            countOpReturn++;
+        }
+        if (!isExtension) continue;
+        if (hasExtensionOutput) throw new Error("multiple extension outputs");
+        hasExtensionOutput = true;
+    }
+
+    if (countOpReturn > MAX_OP_RETURN) {
+        throw new Error(
+            `too many OP_RETURN outputs: ${countOpReturn} > ${MAX_OP_RETURN}`
+        );
     }
 
     const checkpoints = inputs.map((input) =>
@@ -130,12 +146,12 @@ function buildCheckpointTx(
     vtxo: ArkTxInput,
     serverUnrollScript: CSVMultisigTapscript.Type
 ): { tx: Transaction; input: ArkTxInput } {
-    // create the checkpoint vtxo script from collaborative closure
+    // create the checkpoint virtual output script from collaborative closure
     const collaborativeClosure = decodeTapscript(
         scriptFromTapLeafScript(vtxo.tapLeafScript)
     );
 
-    // create the checkpoint vtxo script combining collaborative closure and server unroll script
+    // create the checkpoint virtual output script combining collaborative closure and server unroll script
     const checkpointVtxoScript = new VtxoScript([
         serverUnrollScript.script,
         collaborativeClosure.script,
@@ -180,11 +196,20 @@ function isSeconds(locktime: bigint): boolean {
 
 export function hasBoardingTxExpired(
     coin: ExtendedCoin,
-    boardingTimelock: RelativeTimelock
+    boardingTimelock: RelativeTimelock,
+    chainTipHeight?: number
 ) {
     if (!coin.status.block_time) return false;
     if (boardingTimelock.value === 0n) return true;
-    if (boardingTimelock.type === "blocks") return false; // TODO: handle get chain tip
+
+    if (boardingTimelock.type === "blocks") {
+        if (chainTipHeight === undefined || !coin.status.block_height)
+            return false;
+        return (
+            BigInt(chainTipHeight - coin.status.block_height) >=
+            boardingTimelock.value
+        );
+    }
 
     // validate expiry in terms of seconds
     const now = BigInt(Math.floor(Date.now() / 1000));
@@ -352,8 +377,8 @@ export function combineTapscriptSigs(
 }
 
 /**
- * Validates if a given string is a valid Ark address by attempting to decode it.
- * @param address The Ark address to validate.
+ * Validates if a given string is a valid Arkade address by attempting to decode it.
+ * @param address The Arkade address to validate.
  * @returns True if the address is valid, false otherwise.
  */
 export function isValidArkAddress(address: string): boolean {

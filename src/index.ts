@@ -11,7 +11,13 @@ import type {
     NetworkOptions,
     DescriptorOptions,
 } from "./identity/seedIdentity";
-import { Identity, ReadonlyIdentity } from "./identity";
+import {
+    Identity,
+    ReadonlyIdentity,
+    BatchSignableIdentity,
+    SignRequest,
+    isBatchSignable,
+} from "./identity";
 import { ArkAddress } from "./script/address";
 import { VHTLC } from "./script/vhtlc";
 import { DefaultVtxo } from "./script/default";
@@ -82,10 +88,13 @@ import {
 } from "./tree/signingSession";
 import { Ramps } from "./wallet/ramps";
 import { isVtxoExpiringSoon, VtxoManager } from "./wallet/vtxo-manager";
+import type { IVtxoManager, SettlementConfig } from "./wallet/vtxo-manager";
 import {
     ServiceWorkerWallet,
     ServiceWorkerReadonlyWallet,
+    DEFAULT_MESSAGE_TIMEOUTS,
 } from "./wallet/serviceWorker/wallet";
+import type { MessageTimeouts } from "./wallet/serviceWorker/wallet";
 import { OnchainWallet } from "./wallet/onchain";
 import { setupServiceWorker } from "./worker/browser/utils";
 import {
@@ -239,7 +248,17 @@ import type {
 } from "./contracts";
 import { IContractManager } from "./contracts/contractManager";
 import { closeDatabase, openDatabase } from "./repositories/indexedDB/manager";
-import { WalletMessageHandler } from "./wallet/serviceWorker/wallet-message-handler";
+import {
+    WalletMessageHandler,
+    WalletNotInitializedError,
+    ReadonlyWalletError,
+    DelegatorNotConfiguredError,
+} from "./wallet/serviceWorker/wallet-message-handler";
+import {
+    MESSAGE_BUS_NOT_INITIALIZED,
+    MessageBusNotInitializedError,
+    ServiceWorkerTimeoutError,
+} from "./worker/errors";
 
 export {
     // Wallets
@@ -250,6 +269,7 @@ export {
     SeedIdentity,
     MnemonicIdentity,
     ReadonlyDescriptorIdentity,
+    isBatchSignable,
     OnchainWallet,
     Ramps,
     VtxoManager,
@@ -279,8 +299,15 @@ export {
     setupServiceWorker,
     MessageBus,
     WalletMessageHandler,
+    WalletNotInitializedError,
+    ReadonlyWalletError,
+    DelegatorNotConfiguredError,
+    MESSAGE_BUS_NOT_INITIALIZED,
+    MessageBusNotInitializedError,
+    ServiceWorkerTimeoutError,
     ServiceWorkerWallet,
     ServiceWorkerReadonlyWallet,
+    DEFAULT_MESSAGE_TIMEOUTS,
 
     // Tapscript
     decodeTapscript,
@@ -291,7 +318,7 @@ export {
     CLTVMultisigTapscript,
     TapTreeCoder,
 
-    // Ark PSBT fields
+    // Arkade PSBT fields
     ArkPsbtFieldKey,
     ArkPsbtFieldKeyType,
     setArkPsbtField,
@@ -380,6 +407,8 @@ export type {
     // Types and Interfaces
     Identity,
     ReadonlyIdentity,
+    BatchSignableIdentity,
+    SignRequest,
     IWallet,
     IReadonlyWallet,
     BaseWalletConfig,
@@ -462,6 +491,8 @@ export type {
 
     // Wallet types
     GetVtxosFilter,
+    SettlementConfig,
+    IVtxoManager,
 
     // Asset types
     Asset,
@@ -478,7 +509,7 @@ export type {
     Nonces,
     PartialSig,
 
-    // Ark PSBT fields
+    // Arkade PSBT field coder
     ArkPsbtFieldCoder,
 
     // TxTree
@@ -514,6 +545,7 @@ export type {
     MessageHandler,
     RequestEnvelope,
     ResponseEnvelope,
+    MessageTimeouts,
 
     // Delegator types
     IDelegatorManager,
